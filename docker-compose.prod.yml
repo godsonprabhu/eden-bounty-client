@@ -1,0 +1,201 @@
+# EDEN BOUNTY Sdn. Bhd. — PRODUCTION Compose configuration
+# Separate from docker-compose.yml (development). Usage: see DEPLOYMENT_GUIDE.md
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# .env.production is read ONLY by Compose for ${...} interpolation. Containers do not receive the
+# whole file: each service gets an explicit allow-list below (least privilege — e.g. the API never
+# sees PG_PASSWORD or Caddy settings, and Caddy never sees DATABASE_URL).
+# Only Caddy publishes ports (80/443). The API and web server are internal-only.
+
+name: edenbounty
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging: *default-logging
+
+# Settings every API process needs (the production startup guard validates them).
+x-api-core-env: &api-core-env
+  APP_ENV: production
+  DEBUG: "false"
+  CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS, e.g. ["https://edenbounty.org","https://www.edenbounty.org"]}
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL (see PRODUCTION_ENVIRONMENT_VARIABLES.md)}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-5}
+  DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+  # Origin used in invitation and password-reset links; the startup guard requires https.
+  PUBLIC_SITE_URL: https://${SITE_DOMAIN:?Set SITE_DOMAIN}
+
+networks:
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET:-172.30.0.0/24}
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  # Confidential investor documents (PDFs). Back this volume up together with the database.
+  investor_documents:
+
+services:
+  caddy:
+    <<: *hardening
+    image: caddy:2.10-alpine
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${HTTP_BIND:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+      - "${HTTP_BIND:-0.0.0.0}:${HTTPS_PORT:-443}:443/udp"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?Set SITE_DOMAIN (e.g. edenbounty.org)}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL for Let's Encrypt notices}
+      CADDY_GLOBAL_OPTIONS: ${CADDY_GLOBAL_OPTIONS:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    healthcheck:
+      # Caddy's admin API listens on localhost:2019 inside the container only.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  frontend:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: https://${SITE_DOMAIN:?Set SITE_DOMAIN}
+        INTERNAL_BACKEND_URL: http://backend:8000
+    image: edenbounty/web:${RELEASE_TAG:-latest}
+    read_only: true
+    environment:
+      # Content-Security-Policy: enforce (default) | report-only | off. See SECURITY_AUDIT.md.
+      CSP_MODE: ${CSP_MODE:-enforce}
+      CSP_REPORT_URI: ${CSP_REPORT_URI:-}
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    networks: [edge]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  backend:
+    <<: *hardening
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    image: edenbounty/api:${RELEASE_TAG:-latest}
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      <<: *api-core-env
+      WORKERS: "1"
+      # Trust X-Forwarded-For only from Caddy/Next on the internal edge network.
+      TRUSTED_PROXIES: '["${EDGE_SUBNET:-172.30.0.0/24}"]'
+      TRUSTED_CLOUDFLARE_PROXIES: ${TRUSTED_CLOUDFLARE_PROXIES:-[]}
+      SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-smtp.hostinger.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      OPERATIONS_NOTIFY_EMAIL: ${OPERATIONS_NOTIFY_EMAIL:-info@edenbounty.org}
+      PRIVATE_STORAGE_DIR: /var/lib/edenbounty/private
+      # Investor document malware scanning: off | clamav (start the `scan` profile first).
+      DOCUMENT_SCAN_MODE: ${DOCUMENT_SCAN_MODE:-off}
+      CLAMAV_HOST: ${CLAMAV_HOST:-clamav}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+    volumes:
+      # The root filesystem is read-only; this is the only writable, persistent path.
+      - investor_documents:/var/lib/edenbounty/private
+    networks: [edge]
+
+  # ---- One-off operational tasks (never started by `up`) ---------------------
+  migrate:
+    image: edenbounty/api:${RELEASE_TAG:-latest}
+    profiles: [ops]
+    environment: *api-core-env
+    # Active migration head: 0012_deactivate_shisha_and_axe_oil. Staging only.
+    command: ["alembic", "upgrade", "head"]
+    networks: [edge]
+    logging: *default-logging
+
+  seed:
+    image: edenbounty/api:${RELEASE_TAG:-latest}
+    profiles: [ops]
+    environment: *api-core-env
+    command: ["python", "-m", "app.scripts.seed_divisions"]
+    networks: [edge]
+    logging: *default-logging
+
+  # Deletes expired sessions and obsolete invitation/reset tokens (never an active session).
+  # Run daily from the host's scheduler; see DEPLOYMENT_GUIDE.md §8.
+  cleanup:
+    image: edenbounty/api:${RELEASE_TAG:-latest}
+    profiles: [ops]
+    environment: *api-core-env
+    command: ["python", "-m", "app.cli.cleanup_auth"]
+    networks: [edge]
+    logging: *default-logging
+
+  create-admin:
+    image: edenbounty/api:${RELEASE_TAG:-latest}
+    profiles: [ops]
+    environment: *api-core-env
+    entrypoint: ["python", "-m", "app.cli.create_admin"]
+    stdin_open: true
+    tty: true
+    networks: [edge]
+
+  # ---- Optional malware scanner for investor documents (profile: scan) ---------
+  # Needs ~1.5 GB RAM for signatures. Set DOCUMENT_SCAN_MODE=clamav once it reports healthy.
+  clamav:
+    <<: *hardening
+    image: clamav/clamav:1.4
+    profiles: [scan]
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      start_period: 300s
+      retries: 3
+
+  # ---- Optional self-hosted PostgreSQL (only when NOT using a managed provider) ----
+  postgres:
+    <<: *hardening
+    image: postgres:16-alpine
+    profiles: [selfhosted-db]
+    environment:
+      POSTGRES_DB: ${PG_DB:-eden_bounty}
+      POSTGRES_USER: ${PG_USER:-eb_app}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks: [edge]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

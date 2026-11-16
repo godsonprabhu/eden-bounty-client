@@ -1,0 +1,39 @@
+# EDEN BOUNTY Sdn. Bhd. — Production reverse proxy (automatic HTTPS via Let's Encrypt)
+{
+	email {$ACME_EMAIL}
+	{$CADDY_GLOBAL_OPTIONS}
+}
+
+www.{$SITE_DOMAIN} {
+	redir https://{$SITE_DOMAIN}{uri} permanent
+}
+
+{$SITE_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# Default only: the app sends no-referrer on authentication pages and that must win.
+		?Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# API: straight to FastAPI. The backend root (/health, /) is not published.
+	handle /api/* {
+		# JSON and file downloads only: nothing from the API may run script or be framed.
+		# `?` keeps a stricter policy the API already set (document downloads add `sandbox`).
+		header ?Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		reverse_proxy backend:8000
+	}
+
+	# Everything else: Next.js (sends its own per-request nonce Content-Security-Policy).
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

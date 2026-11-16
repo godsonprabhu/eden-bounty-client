@@ -1,0 +1,59 @@
+# EDEN BOUNTY Sdn. Bhd. — Local Development Compose Configuration
+# Phase C13.1 — Backend Foundation & Database Setup
+
+networks:
+  eb_internal:
+    driver: bridge
+
+volumes:
+  eb_pg_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eb_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-eden_bounty_db}
+      POSTGRES_USER: ${DB_USER:-eb_db_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in project-root .env}
+    ports:
+      # Bound to 127.0.0.1:5433 to avoid collision with existing local PostgreSQL on 5432
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - eb_pg_data:/var/lib/postgresql/data
+    networks:
+      - eb_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-eb_db_user} -d $${POSTGRES_DB:-eden_bounty_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: eb_backend_dev
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DEBUG: ${DEBUG:-true}
+      CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000","http://localhost:3001","http://127.0.0.1:8000","https://edenbounty.org"]'
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-eb_db_user}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in project-root .env}
+      DB_NAME: ${DB_NAME:-eden_bounty_db}
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-eb_db_user}:${DB_PASSWORD:?Set DB_PASSWORD in project-root .env}@postgres:5432/${DB_NAME:-eden_bounty_db}
+      PORT: 8000
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - eb_internal
+    depends_on:
+      postgres:
+        condition: service_healthy

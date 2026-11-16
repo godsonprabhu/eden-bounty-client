@@ -1,0 +1,83 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+/test-results/
+/.pw-frontend.*/
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+
+# certificates and private keys
+*.pem
+*.key
+*.crt
+*.pfx
+id_rsa*
+
+# debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local env files
+.env*.local
+.env
+# any environment file except the committed templates
+.env.*
+!.env.*.example
+!.env.example
+backend/.env.*
+!backend/.env.example
+!backend/.env.*.example
+backend/.env
+backend/.env.*.local
+
+# python / backend
+backend/.venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# local-only material: database dumps, working scratch files, review screenshots, reports
+backups/
+scratch/
+review-screenshots/
+reports/
+
+# confidential investor documents (never commit)
+private_storage/
+backend/private_storage/
+
+
+/cloudflared-linux-amd64.deb
+/scratch_product_details.txt
+# Local AI tool credentials and working directory
+.agents/
+
+# Local development tool configuration
+/.mcp.json
